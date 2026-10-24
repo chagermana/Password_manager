@@ -12,55 +12,67 @@ const MAX_PASSWORD_LENGTH = 64;   // we can assume no password is longer than th
 
 /********* Implementation ********/
 class Keychain {
-  /**
-   * Initializes the keychain using the provided information. Note that external
-   * users should likely never invoke the constructor directly and instead use
-   * either Keychain.init or Keychain.load. 
-   * Arguments:
-   *  You may design the constructor with any parameters you would like. 
-   * Return Type: void
-   */
-  constructor() {
-    this.data = { 
-      /* Store member variables that you intend to be public here
-         (i.e. information that will not compromise security if an adversary sees) */
-    };
-    this.secrets = {
-      /* Store member variables that you intend to be private here
-         (information that an adversary should NOT see). */
-    };
+  // only values are stored in the constructor. 
+  // it is  called by init (new keychain) and load (exisitng keychain)
+  //hmacKey and aesKey live in memory only. they are never saved to disk
+  //salt, kvs and check are saved in the dump, since they dont help an attacker
+  // salt isnt a secret, kvs and check are encrypted
+  constructor(hmacKey, aesKey, salt, kvs, check) { 
 
-    throw "Not Implemented!";
+         this.hmacKey = hmacKey; // key for hiding domain names (HMAC)
+         this.aesKey = aesKey; // key for encrypting password (AES-GCM)
+         this.salt = salt; // (random value, saved as a Base64 string)
+         this.kvs = kvs; //(the key-value store: HMAC(domain-> encrypted password)
+         this.check = check; //({iv,ct} : lets load() detect a wrong master password)
   };
+//the master password is changed into the 2 keys needed. both init and load call the function therefore same password&salt = same keys
 
-  /** 
-    * Creates an empty keychain with the given password.
-    *
-    * Arguments:
-    *   password: string
-    * Return Type: void
-    */
-  static async init(password) {
-    throw "Not Implemented!";
+  static async deriveKeys(password, salt) {
+    //turning of password string into a key object that pbkdf2 can use 
+    const rawKey = await subtle.importKey(
+      "raw", stringToBuffer(password), "PBKDF2", false, ["deriveKey"]
+    );
+    
+    //run pbkdff2 once. 
+    const masterKey = await subtle.deriveKey(
+      {
+        name: "PBKDF2", salt: salt,iterations:PBKDF2_ITERATIONS, hash: "SHA-256"
+      },
+      rawKey,
+      { name: "HMAC", hash: "SHA-256", length: 256 },
+      false,
+      ["sign"]
+    );
+    
+// use hmac as a prf
+      const hmacBytes = await subtle.sign("HMAC", masterKey, stringToBuffer("domain-key"));
+      const aesBytes = await subtle.sign("HMAC", masterKey, stringToBuffer("aes-key"));
+// each value is changed to a key object for its own job
+      const hmacKey = await subtle.importKey(
+      "raw", hmacBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+    const aesKey = await subtle.importKey(
+      "raw", aesBytes, "AES-GCM", false, ["encrypt", "decrypt"]);
+
+      return { hmacKey, aesKey };
   }
+  //a new, empty keychain is created
+    static async init(password) {
+    const salt = getRandomBytes(16);
+    const { hmacKey, aesKey } = await Keychain.deriveKeys(password, salt);
 
-  /**
-    * Loads the keychain state from the provided representation (repr). The
-    * repr variable will contain a JSON encoded serialization of the contents
-    * of the KVS (as returned by the dump function). The trustedDataCheck
-    * is an *optional* SHA-256 checksum that can be used to validate the 
-    * integrity of the contents of the KVS. If the checksum is provided and the
-    * integrity check fails, an exception should be thrown. You can assume that
-    * the representation passed to load is well-formed (i.e., it will be
-    * a valid JSON object).Returns a Keychain object that contains the data
-    * from repr. 
-    *
-    * Arguments:
-    *   password:           string
-    *   repr:               string
-    *   trustedDataCheck: string
-    * Return Type: Keychain
-    */
+    // The check value lets load() notice a wrong password
+    const iv = getRandomBytes(12);
+    const ct = await subtle.encrypt(
+      { name: "AES-GCM", iv: iv },
+      aesKey,
+      stringToBuffer("keychain")
+    );
+    // buffers cant be saved in json so they are converted to base 64 strings
+    const check = { iv: encodeBuffer(iv), ct: encodeBuffer(ct) };
+    // return a new keychain instance with the derived keys, encoded salt, empty kvs, and check value
+    return new Keychain(hmacKey, aesKey, encodeBuffer(salt), {}, check);
+  }
+ 
   static async load(password, repr, trustedDataCheck) {
     throw "Not Implemented!";
   };
