@@ -103,8 +103,37 @@ class Keychain {
     * Return Type: Promise<string>
     */
   async get(name) {
-    throw "Not Implemented!";
-  };
+    // Compute the target KVS key
+    const nameBuffer = stringToBuffer(name);
+    const hmacBuffer = await subtle.sign("HMAC", this.hmacKey, nameBuffer);
+    const kvsKey = encodeBuffer(hmacBuffer);
+
+    // Return null if the domain does not exist in the KVS
+    if (!(kvsKey in this.kvs)) {
+      return null;
+    }
+
+    const { iv: encodedIv, ct: encodedCt } = this.kvs[kvsKey];
+    const iv = decodeBuffer(encodedIv);
+    const ct = decodeBuffer(encodedCt);
+
+    try {
+      // Decrypt the payload, verifying the bound domain (additionalData)
+      const decryptedBuffer = await subtle.decrypt(
+        { name: "AES-GCM", iv: iv, additionalData: hmacBuffer },
+        this.aesKey,
+        ct
+      );
+      
+      const decryptedString = bufferToString(decryptedBuffer);
+      
+      // Strip the null padding to return the raw password
+      return decryptedString.replace(/\x00+$/, '');
+    } catch (e) {
+      // Caught if decryption fails or a swap attack triggers an integrity mismatch
+      throw new Error("Decryption failed: integrity check failed or potential swap attack detected.");
+    }
+  }
 
   /** 
   * Inserts the domain and associated data into the KVS. If the domain is
@@ -117,8 +146,31 @@ class Keychain {
   * Return Type: void
   */
   async set(name, value) {
-    throw "Not Implemented!";
-  };
+    // 1. HMAC the domain name to create a secure, hidden KVS key
+    const nameBuffer = stringToBuffer(name);
+    const hmacBuffer = await subtle.sign("HMAC", this.hmacKey, nameBuffer);
+    const kvsKey = encodeBuffer(hmacBuffer);
+
+    // 2. Pad the password using the predefined constant to obscure its length
+    const paddedValue = value.padEnd(MAX_PASSWORD_LENGTH, '\x00');
+    const valueBuffer = stringToBuffer(paddedValue);
+
+    // 3. Generate a fresh IV for AES-GCM
+    const iv = getRandomBytes(12);
+
+    // 4. Encrypt the password and bind it to the domain using additionalData
+    const cipherText = await subtle.encrypt(
+      { name: "AES-GCM", iv: iv, additionalData: hmacBuffer },
+      this.aesKey,
+      valueBuffer
+    );
+
+    // 5. Store the encoded IV and ciphertext in the KVS
+    this.kvs[kvsKey] = {
+      iv: encodeBuffer(iv),
+      ct: encodeBuffer(cipherText)
+    };
+  }
 
   /**
     * Removes the record with name from the password manager. Returns true
@@ -129,8 +181,17 @@ class Keychain {
     * Return Type: Promise<boolean>
   */
   async remove(name) {
-    throw "Not Implemented!";
-  };
+    const nameBuffer = stringToBuffer(name);
+    const hmacBuffer = await subtle.sign("HMAC", this.hmacKey, nameBuffer);
+    const kvsKey = encodeBuffer(hmacBuffer);
+
+    if (kvsKey in this.kvs) {
+      delete this.kvs[kvsKey];
+      return true;
+    }
+    
+    return false;
+  }
 };
 
 module.exports = { Keychain }
