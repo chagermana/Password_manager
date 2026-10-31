@@ -74,8 +74,32 @@ class Keychain {
   }
  
   static async load(password, repr, trustedDataCheck) {
-    throw "Not Implemented!";
-  };
+  // 1. Integrity check (only if a checksum was provided)
+  if (trustedDataCheck !== undefined) {
+    const hashBuffer = await subtle.digest("SHA-256", stringToBuffer(repr));
+    if (encodeBuffer(hashBuffer) !== trustedDataCheck) {
+      throw new Error("Integrity check failed: data may have been tampered with.");
+    }
+  }
+
+  // 2. Parse the saved data and rebuild the keys from the password + saved salt
+  const data = JSON.parse(repr);
+  const { hmacKey, aesKey } = await Keychain.deriveKeys(password, decodeBuffer(data.salt));
+
+  // 3. Detect a wrong password by trying to decrypt the check value
+  try {
+    await subtle.decrypt(
+      { name: "AES-GCM", iv: decodeBuffer(data.check.iv) },
+      aesKey,
+      decodeBuffer(data.check.ct)
+    );
+  } catch (e) {
+    throw new Error("Invalid password");
+  }
+
+  // 4. Build and return the keychain
+  return new Keychain(hmacKey, aesKey, data.salt, data.kvs, data.check);
+}
 
   /**
     * Returns a JSON serialization of the contents of the keychain that can be 
@@ -90,8 +114,19 @@ class Keychain {
     * Return Type: array
     */ 
   async dump() {
-    throw "Not Implemented!";
-  };
+  // 1. Turn the saved parts into one JSON string
+  const contents = JSON.stringify({
+    kvs: this.kvs,
+    salt: this.salt,
+    check: this.check
+  });
+
+  // 2. SHA-256 hash of that exact string
+  const hashBuffer = await subtle.digest("SHA-256", stringToBuffer(contents));
+
+  // 3. Hash becomes a Base64 string, then return both
+  return [contents, encodeBuffer(hashBuffer)];
+}
 
   /**
     * Fetches the data (as a string) corresponding to the given domain from the KVS.
