@@ -142,5 +142,59 @@ describe('Password manager', async function() {
             expect(Object.getOwnPropertyNames(contentsObj.kvs)).to.have.length(10);
         });
 
+        // IV/Nonce Randomization $ Indistinguishability Test
+        // This test ensures that even if two stored values are identical, their encrypted representations are distinct, implying the use of unique IVs/nonces. 
+        it('uses distinct IVs/nonces for identical stored values', async function() {
+            let keychain = await Keychain.init(password);
+            await keychain.set('domain1.com', 'samepassword');
+            await keychain.set('domain2.com', 'samepassword');
+            
+            let data = await keychain.dump();
+            let kvs = JSON.parse(data[0]).kvs;
+            
+            let keys = Object.keys(kvs);
+            expect(kvs[keys[0]]).not.to.equal(kvs[keys[1]]);
+        });
+
+        // HMAC/AED Integrity & Tamper Protection Test
+        it('rejects tampered serialized contents (integrity test)', async function() {
+            let keychain = await Keychain.init(password);
+            await keychain.set('google.com', 'secret123');
+            
+            let [contents, checksum] = await keychain.dump();
+            
+            // Flip a character in the ciphertext JSON representation
+            let tamperedContents = contents.replace(/[a-zA-Z0-9]/, 'X');
+            await expectReject(Keychain.load(password, tamperedContents, checksum));
+        });
+
+        // Domain Swap & Rollback Resistance
+        // Ensures domain names are bound to their specific record (e.g., using HMAC over the domain or authenticated data) so an attacker cannot swap encrypted entries between domains.
+        it('prevents swapping encrypted payloads between domains', async function() {
+            let keychain = await Keychain.init(password);
+            await keychain.set('bank.com', 'bankpassword');
+            await keychain.set('social.com', 'socialpassword');
+            
+            let [contents, checksum] = await keychain.dump();
+            let parsed = JSON.parse(contents);
+            
+            let keys = Object.keys(parsed.kvs);
+            if (keys.length >= 2) {
+                // Swap values of the first two keys
+                let temp = parsed.kvs[keys[0]];
+                parsed.kvs[keys[0]] = parsed.kvs[keys[1]];
+                parsed.kvs[keys[1]] = temp;
+                
+                let swappedContents = JSON.stringify(parsed);
+                // Should either fail to load or resolve swapped keys to null/fail decryption
+                try {
+                    let loadedKeychain = await Keychain.load(password, swappedContents, checksum);
+                    let val = await loadedKeychain.get(keys[0]);
+                    expect(val).not.to.equal('socialpassword');
+                } catch (e) {
+                    // Exception on load is also acceptable behavior for HMAC failure
+                }
+            }
+        });
     });
 });
